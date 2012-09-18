@@ -1,0 +1,78 @@
+#!/bin/sh
+
+# Copyright (c) 2012, [di] digitale informationssysteme GmbH
+# All rights reserved.
+# This software is provided under the terms of the new (3-clause) BSD license.
+# Please see the file LICENSE for details.
+
+# Simply run without any parameters to get usage information.
+
+usage() {
+	cat >&2 <<EOF
+usage: nagios_http_redirs CONFIG
+
+CONFIG is a file which contains one or more lines consisting of
+ 1) a URL to request
+ 2) whitespace
+ 3) a regex that will be directly passed to grep
+
+The value of the Location header returned must match the regexp.
+
+Returns OK if it matches, WARNING if it does not match and CRITICAL
+if there is no Location header at all.
+EOF
+	exit 127
+}
+
+debug() {
+	if [ -n "$REDIR_DEBUG" ]; then
+		echo "$@" >&2
+	fi
+}
+
+if [ "$#" -lt 1 ]; then
+	usage
+fi
+
+config="$1"
+shift
+
+count=0
+
+res="$(grep -v '^[[:space:]]*#' "$config" | while read -r line; do
+	# Take first field (URL).
+	url="$(echo "$line" | awk '{ print $1; }')"
+	debug "URL:        $url"
+	# Take everything but the first field (regex).
+	regex="$(echo "$line" | awk '{ $1 = ""; print substr($0, 2); }')"
+	debug "RegEx:      $regex"
+	# Retrieve the headers (follow redirects) and take the last Response Code and Location header.
+	lastlocrc="$(curl -sIL "$url" | awk 'tolower($1) ~ /^location:$/ { $1 = ""; out = substr($0, 2); gsub(/\r/, "", out); }; $1 ~ /HTTP\/1\.[01]/ { rc = $2; }; END { print rc " " out; };')"
+	httprc="$(echo "$lastlocrc" | cut -d ' ' -f 1)"
+	lastloc="$(echo "$lastlocrc" | cut -d ' ' -f 2-)"
+	debug "RC/LastLoc: $lastlocrc"
+	if [ -z "$lastloc" ]; then
+		echo "REDIR CRITICAL: $url is not a redirect"
+		exit 2
+	fi
+	if [ "$httprc" -ne 200 ]; then
+		echo "REDIR CRITICAL: $url returns HTTP $httprc, not 200"
+		exit 2
+	fi
+	if ! echo "$lastloc" | grep -q "$regex"; then
+		echo "REDIR WARNING: $url redirects to $lastloc which does not match $regex"
+		exit 1
+	fi
+	debug 'OK.'
+	count=$(($count + 1))
+	echo "$count"
+done)"
+rc="$?"
+
+if [ "$rc" -eq 0 ]; then
+	echo "REDIR OK: all $(echo "$res" | tail -n 1) URLs checked matched their targets"
+	exit 0
+else
+	echo "$res" | tail -n 1
+	exit "$rc"
+fi
